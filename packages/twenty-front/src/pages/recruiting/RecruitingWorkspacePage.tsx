@@ -6,7 +6,8 @@ import { useSearchParams } from 'react-router-dom';
 import { t } from '@lingui/core/macro';
 import { Button } from '@/recruiting/shadcn/compat';
 import { Tabs } from '@/recruiting/shadcn/compat';
-import { IconBriefcase, IconClock } from 'twenty-ui/icon';
+import { IconBriefcase, IconClock, IconSettings } from 'twenty-ui/icon';
+import { RecruitingSettingsDialog } from '@/recruiting/settings/components/RecruitingSettingsDialog';
 import { PageHeader } from '@/ui/layout/page/components/PageHeader';
 import { RecruitingCandidateIntake } from '@/recruiting/intake/components/CandidateIntake';
 import { RecruitingQueueDialog } from '@/recruiting/queue/components/QueueDialog';
@@ -27,6 +28,7 @@ export const RecruitingWorkspacePage = ({
   standalone?: boolean;
 }) => {
   const [params, setParams] = useSearchParams();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [hasNewTasks, setHasNewTasks] = useState(false);
   const requestedTab = params.get('tab') ?? 'resumes';
@@ -42,6 +44,15 @@ export const RecruitingWorkspacePage = ({
     : 'resumes';
   const companyJobsId = params.get('companyJobs');
   const candidateId = params.get('candidateId') ?? undefined;
+  const settingsButton = (
+    <Button
+      variant="ghost"
+      aria-label={t`招聘设置`}
+      onClick={() => setSettingsOpen(true)}
+    >
+      <IconSettings size={18} />
+    </Button>
+  );
   return (
     <StyledRecruitingWorkspace className="recruiting-shadcn">
       {standalone ? (
@@ -52,7 +63,10 @@ export const RecruitingWorkspacePage = ({
               本地预览 · 连接线上数据
             </p>
           </div>
-          <Button onClick={() => setQueueOpen(true)}>处理队列</Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setQueueOpen(true)}>处理队列</Button>
+            {settingsButton}
+          </div>
         </header>
       ) : (
         <PageHeader title={t`招聘工作台`} Icon={IconBriefcase}>
@@ -65,6 +79,7 @@ export const RecruitingWorkspacePage = ({
           >
             {hasNewTasks ? t`处理队列 · 有新任务` : t`处理队列`}
           </Button>
+          {settingsButton}
         </PageHeader>
       )}
       <StyledRecruitingBody
@@ -169,6 +184,12 @@ export const RecruitingWorkspacePage = ({
           </Tabs.Panel>
         </Tabs.Root>
       </StyledRecruitingBody>
+      {settingsOpen && (
+        <RecruitingSettingsDialog
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+        />
+      )}
       <RecruitingQueueDialog open={queueOpen} onOpenChange={setQueueOpen} />
     </StyledRecruitingWorkspace>
   );

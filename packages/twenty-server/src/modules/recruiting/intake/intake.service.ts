@@ -1,3 +1,4 @@
+import { RecruitingCategoriesService } from '../categories/categories.service';
 import { localTextMaterial } from './domain/local-text-material';
 import { candidateFields } from './candidate-fields';
 import { decodeMultipartFilename } from '../files/domain/multipart-filename';
@@ -8,6 +9,7 @@ import {
   Injectable,
   NotFoundException,
   Logger,
+  Optional,
 } from '@nestjs/common';
 
 import { createHash } from 'node:crypto';
@@ -96,6 +98,7 @@ export class RecruitingIntakeService {
     private readonly candidates: RecruitingCandidateRecordsService,
     @InjectMessageQueue(MessageQueue.recruitingQueue)
     private readonly queue: MessageQueueService,
+    @Optional() private readonly categories?: RecruitingCategoriesService,
   ) {}
 
   /** Reuses the same candidate on an exact email match and on concurrent first-time submissions. */
@@ -523,6 +526,7 @@ export class RecruitingIntakeService {
       await update('EXTRACTING');
       let extraction = envelope.extraction;
       if (!extraction) {
+        const categories = await this.categories?.list(context.workspace.id);
         const parts = envelope.extractionParts ?? [];
         const progress = {
           parts,
@@ -536,6 +540,7 @@ export class RecruitingIntakeService {
             materials,
             envelope.input.note ?? '',
             progress,
+            categories,
           );
         else {
           const company = await this.records.one(
@@ -553,6 +558,7 @@ export class RecruitingIntakeService {
               preferences: company.recruitmentPreferences,
             }),
             progress,
+            categories,
           );
         }
         if (envelope.input.employmentType) {

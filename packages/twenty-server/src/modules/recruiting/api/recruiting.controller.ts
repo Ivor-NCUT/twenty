@@ -1,3 +1,4 @@
+import { RecruitingCategoriesService } from '../categories/categories.service';
 import { RecruitingJobPageService } from '../portal/job-page.service';
 import { decodeMultipartFilename } from '../files/domain/multipart-filename';
 import { ProcessingTasksService } from '../intake/processing-tasks.service';
@@ -86,7 +87,38 @@ export class RecruitingController {
     private readonly activities: RecruitingActivityService,
     private readonly processingTasks: ProcessingTasksService,
     private readonly candidateFiles: RecruitingCandidateFilesService,
+    private readonly categories: RecruitingCategoriesService,
   ) {}
+  @Get('categories')
+  listCategories(@Req() request: Request) {
+    const context = buildWorkspaceAuthContextFromRequest(request);
+    return this.categories.list(context.workspace.id);
+  }
+
+  @Post('categories')
+  changeCategories(@Req() request: Request, @Body() body: unknown) {
+    const context = buildWorkspaceAuthContextFromRequest(request);
+    if (
+      context.type !== 'user' ||
+      context.application ||
+      context.viaApplication ||
+      context.agentId ||
+      isImpersonating(request.impersonationContext) ||
+      !userIsFullAdmin(context.user)
+    )
+      throw new ForbiddenException('请由管理员管理招聘分类');
+
+    const action = z
+      .union([
+        z.object({ name: z.string().trim().min(1).max(40) }).strict(),
+        z.object({ id: z.string().min(1).max(80) }).strict(),
+      ])
+      .safeParse(body);
+    if (!action.success) throw new BadRequestException('无效的分类操作');
+
+    return this.categories.change(context.workspace.id, action.data);
+  }
+
   @Post('brief-test') testBrief(@Body() input: unknown) {
     return this.drafts.testTemplate(input);
   }

@@ -3,6 +3,8 @@ import { RecruitingJobPageController } from './portal/job-page.controller';
 import { RecruitingQueueSettingsController } from './intake/queue-settings.controller';
 import { ProcessingTasksService } from './intake/processing-tasks.service';
 /** Registers the recruiting domain without replacing native CRM records, authentication or models. */
+import { RecruitingCategoriesService } from './categories/categories.service';
+import { KeyValuePairEntity } from 'src/engine/core-modules/key-value-pair/key-value-pair.entity';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
@@ -77,6 +79,7 @@ import { RecruitingPortalController } from './portal/portal.controller';
     MessagingIMAPDriverModule,
     FilesFieldModule,
     TypeOrmModule.forFeature([
+      KeyValuePairEntity,
       ApiKeyEntity,
       FileEntity,
       ConnectedAccountEntity,
@@ -89,6 +92,7 @@ import { RecruitingPortalController } from './portal/portal.controller';
     RecruitingJobPageController,
   ],
   providers: [
+    RecruitingCategoriesService,
     RecruitingJobPageService,
     ProcessingTasksService,
     RecruitingActorService,

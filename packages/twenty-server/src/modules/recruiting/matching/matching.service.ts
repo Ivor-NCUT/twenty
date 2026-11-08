@@ -1,3 +1,5 @@
+import { RecruitingCategoriesService } from '../categories/categories.service';
+import { isPlainObject } from 'twenty-shared/utils';
 import { getMatchBilling } from './domain/match-billing';
 /** Coordinates independent matching runs; stored candidates are never rolled back by scoring failures. */
 import {
@@ -84,6 +86,7 @@ export class RecruitingMatchingService {
     @InjectMessageQueue(MessageQueue.recruitingMatchQueue)
     private readonly queue: MessageQueueService,
     @Optional() private readonly orm?: WorkspaceOrmManager,
+    @Optional() private readonly categories?: RecruitingCategoriesService,
   ) {}
 
   /** Gives intake and native record events one content-based automatic-run identity. */
@@ -929,7 +932,7 @@ export class RecruitingMatchingService {
       );
       if (!jobFirst && !this.isCandidate(subject))
         throw new BadRequestException('来源联系人已不再是候选人');
-      const pool =
+      const rawPool =
         input.direction === 'PAIR'
           ? [await this.records.one(context, 'recruitmentJob', input.jobId!)]
           : input.targetIds
@@ -949,8 +952,25 @@ export class RecruitingMatchingService {
                   ? { contactRoles: { containsAny: ['CANDIDATE'] } }
                   : { jobStatus: { eq: 'RECRUITING' } },
               );
-      const ids =
-        payload.targetIds ?? input.targetIds ?? pool.map((entry) => entry.id);
+      const catalog = await this.categories?.list(context.workspace.id);
+      const activeIds = new Set(catalog?.map(({ id }) => id));
+      const categoryOf = (record: RecruitingRecord) => {
+        const profile = record.recruitingProfile;
+        const id = isPlainObject(profile) ? profile.category : null;
+        return typeof id === 'string' && activeIds.has(id) ? id : null;
+      };
+      const subjectCategory = categoryOf(subject);
+      const pool = catalog
+        ? rawPool.filter((entry) => {
+            const category = categoryOf(entry);
+            return category === null || category === subjectCategory;
+          })
+        : rawPool;
+      const eligibleIds = new Set(pool.map(({ id }) => id));
+      const ids = (
+        payload.targetIds ??
+        input.targetIds ?? [...eligibleIds]
+      ).filter((id) => !catalog || eligibleIds.has(id));
       const selected = [...new Set(ids)];
       const companies = new Map(
         (await this.records.all(context, 'company')).map((entry) => [

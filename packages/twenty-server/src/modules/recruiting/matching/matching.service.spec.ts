@@ -3,6 +3,7 @@ import { NotFoundException } from '@nestjs/common';
 
 import { type WorkspaceAuthContext } from 'src/engine/core-modules/auth/types/workspace-auth-context.type';
 import { type MessageQueueService } from 'src/engine/core-modules/message-queue/services/message-queue.service';
+import { type RecruitingCategoriesService } from '../categories/categories.service';
 import { type RecruitingActorService } from '../auth/actor.service';
 import { type RecruitingRecordsService } from '../records/records.service';
 import {
@@ -20,7 +21,11 @@ const context = {
 } as WorkspaceAuthContext;
 
 /** Uses isolated native-like records; no production data or model endpoint participates. */
-const setup = (count = 7, orm?: unknown) => {
+const setup = (
+  count = 7,
+  orm?: unknown,
+  categories?: Pick<RecruitingCategoriesService, 'list'>,
+) => {
   const person = { id: 'person', contactRoles: ['CANDIDATE'] };
   const jobs = Array.from({ length: count }, (_, index) => ({
     id: `job-${index}`,
@@ -145,6 +150,7 @@ const setup = (count = 7, orm?: unknown) => {
       evaluator as unknown as RecruitingPairEvaluatorService,
       queue as unknown as MessageQueueService,
       orm as never,
+      categories as RecruitingCategoriesService | undefined,
     );
   return {
     service: reloadService(),
@@ -757,3 +763,28 @@ it('marks a completed receipt stale after a later professional profile update wi
   });
   expect(records.all).not.toHaveBeenCalled();
 });
+
+it.each(['design', null])(
+  'only scores matching or uncategorized targets for source category %s',
+  async (sourceCategory) => {
+    const categories = {
+      list: jest.fn(async () => [
+        { id: 'design', name: '设计' },
+        { id: 'engineering', name: '工程' },
+      ]),
+    };
+    const { service, rows, evaluator } = setup(5, undefined, categories);
+    rows.get('person')!.recruitingProfile = { category: sourceCategory };
+    rows.get('job-0')!.recruitingProfile = { category: 'design' };
+    rows.get('job-1')!.recruitingProfile = { category: 'engineering' };
+    rows.get('job-2')!.recruitingProfile = { category: 'deleted-category' };
+    rows.get('job-3')!.recruitingProfile = { category: 'other' };
+    await service.process({ runId: 'run', actor });
+    expect(categories.list).toHaveBeenCalledTimes(1);
+    expect(evaluator.run.mock.calls.map(([, , job]) => job.id)).toEqual(
+      sourceCategory
+        ? ['job-0', 'job-2', 'job-3', 'job-4']
+        : ['job-2', 'job-3', 'job-4'],
+    );
+  },
+);

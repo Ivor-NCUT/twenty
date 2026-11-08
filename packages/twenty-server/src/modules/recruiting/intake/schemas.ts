@@ -1,16 +1,6 @@
 /** Defines compact recruiting facts and intake contracts; database identities remain server-owned. */
 import { z } from 'zod';
 
-export const recruitingCategorySchema = z.enum([
-  'engineering',
-  'product',
-  'design',
-  'operations',
-  'growth_marketing',
-  'sales_business',
-  'data_ai',
-  'other',
-]);
 export const employmentTypeSchema = z.enum([
   'full_time',
   'part_time',
@@ -38,7 +28,7 @@ export const candidateProfileSchema = z.object({
   experience: z.array(z.string()),
   education: z.array(z.string()),
   expectedRoles: z.array(z.string()),
-  category: recruitingCategorySchema.nullable(),
+  category: z.string().max(80).nullable(),
   employmentTypes: z.array(employmentTypeSchema),
   employmentEvidence: z.string().nullable(),
   workModes: z.array(workModeSchema),
@@ -54,7 +44,7 @@ export const jobProfilesSchema = z.object({
       title: z.string(),
       description: z.string(),
       preferences: z.string(),
-      category: recruitingCategorySchema.nullable(),
+      category: z.string().max(80).nullable(),
       employmentTypes: z.array(employmentTypeSchema),
       workModes: z.array(workModeSchema),
       locations: z.array(z.string()),

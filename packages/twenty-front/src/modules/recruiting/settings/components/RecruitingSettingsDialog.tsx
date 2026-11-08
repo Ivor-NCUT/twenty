@@ -21,7 +21,6 @@ export const RecruitingSettingsDialog = ({
   const [name, setName] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
-  const [deleting, setDeleting] = useState<Category>();
 
   const save = async (action: { name: string } | { id: string }) => {
     setPending(true);
@@ -33,7 +32,6 @@ export const RecruitingSettingsDialog = ({
       });
       query.updateData(() => categories);
       if ('name' in action) setName('');
-      setDeleting(undefined);
     } catch (error) {
       setError(error instanceof Error ? error.message : t`保存分类失败`);
     } finally {
@@ -102,8 +100,9 @@ export const RecruitingSettingsDialog = ({
                           <Button
                             variant="ghost"
                             aria-label={t`删除分类 ${category.name}`}
+                            className="hover:bg-destructive hover:text-white focus-visible:bg-destructive focus-visible:text-white"
                             disabled={pending}
-                            onClick={() => setDeleting(category)}
+                            onClick={() => void save({ id: category.id })}
                           >
                             <IconTrash size={16} />
                           </Button>
@@ -111,24 +110,6 @@ export const RecruitingSettingsDialog = ({
                       </li>
                     ))}
                   </ul>
-                  {deleting && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p>{t`删除「${deleting.name}」后，使用该分类的记录将按未分类匹配。`}</p>
-                      <Button
-                        disabled={pending}
-                        onClick={() => void save({ id: deleting.id })}
-                      >
-                        {t`确认删除`}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        disabled={pending}
-                        onClick={() => setDeleting(undefined)}
-                      >
-                        {t`取消`}
-                      </Button>
-                    </div>
-                  )}
                 </section>
               </div>
             </Dialog.Popup>

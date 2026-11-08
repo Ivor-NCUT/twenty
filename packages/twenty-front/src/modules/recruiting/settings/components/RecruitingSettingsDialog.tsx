@@ -1,7 +1,7 @@
 /** Manages the shared recruiting categories from the workspace header. */
 import { useState } from 'react';
 import { t } from '@lingui/core/macro';
-import { IconTrash } from 'twenty-ui/icon';
+import { IconTrash, IconX } from 'twenty-ui/icon';
 
 import { Button, Dialog, Input } from '@/recruiting/shadcn/compat';
 import { recruitingRequest } from '@/recruiting/shared/api/request';
@@ -45,22 +45,30 @@ export const RecruitingSettingsDialog = ({
         <Dialog.Backdrop />
         <Dialog.Viewport>
           <div className={recruitingDialogClass}>
-            <Dialog.Popup size="xl">
-              <Dialog.Header className="flex-row items-center justify-between">
+            <Dialog.Popup size="xl" className="gap-0 overflow-hidden p-0">
+              <Dialog.Header className="flex-row items-center justify-between border-b px-6 py-4">
                 <Dialog.Title>{t`招聘设置`}</Dialog.Title>
                 <Dialog.Close asChild>
-                  <Button variant="ghost">{t`关闭`}</Button>
+                  <Button variant="ghost" size="icon" aria-label={t`关闭`}>
+                    <IconX size={18} />
+                  </Button>
                 </Dialog.Close>
               </Dialog.Header>
-              <div className="flex min-h-64 flex-col gap-4 p-4 sm:flex-row">
-                <nav aria-label={t`设置分类`} className="shrink-0 sm:w-36">
-                  <Button variant="secondary" aria-current="page">
+              <div className="flex min-h-0 flex-col overflow-y-auto sm:min-h-64 sm:flex-row">
+                <nav
+                  aria-label={t`设置分类`}
+                  className="shrink-0 border-b bg-muted/40 py-2 sm:w-44 sm:border-r sm:border-b-0"
+                >
+                  <div
+                    aria-current="page"
+                    className="border-l-2 border-primary bg-accent px-4 py-2 text-sm font-medium text-accent-foreground"
+                  >
                     {t`分类管理`}
-                  </Button>
+                  </div>
                 </nav>
                 <section
                   aria-label={t`分类管理`}
-                  className="flex min-w-0 flex-1 flex-col gap-3 sm:border-l sm:pl-4"
+                  className="flex min-w-0 flex-1 flex-col gap-3 p-4 sm:p-6"
                 >
                   <form
                     className="flex gap-2"

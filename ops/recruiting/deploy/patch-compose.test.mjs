@@ -51,7 +51,7 @@ test('replaces only server and worker app images', () => {
 test('does not read an env file and does not turn a resolved true switch into the file value', () => {
   const baseline = productionBaseline();
   assert.equal(baseline.autoMatchResolved, true);
-  assert.equal(baseline.mailreplyLayerInGit, false);
+  assert.equal(baseline.mailreplyLayerInGit, true);
   assert.equal(baseline.workerMemory, '3g');
   const envFile =
     'RECRUITING_AUTO_MATCH_ENABLED=false\nSILICONFLOW_API_KEY=secret\n';

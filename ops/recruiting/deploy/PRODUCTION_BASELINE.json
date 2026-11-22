@@ -6,5 +6,5 @@
   "autoMatchResolved": true,
   "serverMemory": "1280m",
   "workerMemory": "3g",
-  "mailreplyLayerInGit": false
+  "mailreplyLayerInGit": true
 }

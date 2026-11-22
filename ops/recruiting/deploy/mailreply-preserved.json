@@ -1,7 +1,7 @@
 {
   "image": "fanhan-local/fanhan-twenty:1b2ff8f6bb70-mailreply1",
   "digest": "sha256:5c786c079a88e31277b2c1fb894749f85cc60bdae2a82cb12fdb188de4899f8b",
-  "sourceCommit": "1e5f95d8c25c5d3d0114aca27472909750a13450",
+  "sourceCommit": "dd9c1e10eca6709b4298e007704fb1add3eecb2e",
   "liveDistSha256": {
     "intake.service.js": "c12da6f647faf8490e7a5ec15775a79b952d93d6c18eb294b4dcbde1f9405df2",
     "candidate-records.service.js": "925a4e69de1e86eafd8facec78018828ca8a1830ba08720ef7dc6e37b64c3ccc",

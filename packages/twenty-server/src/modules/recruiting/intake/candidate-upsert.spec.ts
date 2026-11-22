@@ -15,7 +15,12 @@ const setup = () => {
     list: jest.fn().mockResolvedValue({ records: [] }),
     create: jest.fn().mockResolvedValue({ id: 'new-id' }),
   };
-  const candidates = { replaceProfile: jest.fn().mockResolvedValue(undefined) };
+  const candidates = {
+    replaceProfile: jest.fn().mockResolvedValue(undefined),
+    attachMailMaterials: jest.fn().mockResolvedValue(undefined),
+    mergeAdditionalEmails: jest.fn().mockResolvedValue(undefined),
+    findCandidateIdsByEmailsForContext: jest.fn(async () => [] as string[]),
+  };
   const service = new RecruitingIntakeService(
     records as never,
     {} as never,
@@ -41,7 +46,7 @@ const setup = () => {
 };
 it('updates an exact-email candidate without creating another person', async () => {
   const { records, candidates, save } = setup();
-  records.list.mockResolvedValue({ records: [{ id: 'existing' }] });
+  candidates.findCandidateIdsByEmailsForContext.mockResolvedValue(['existing']);
   expect(await save()).toBe('existing');
   expect(candidates.replaceProfile).toHaveBeenCalledWith(
     {},
@@ -59,9 +64,9 @@ it('creates a person only when no candidate exists', async () => {
 });
 it('reuses the winner when another submission creates the email concurrently', async () => {
   const { records, candidates, save } = setup();
-  records.list
-    .mockResolvedValueOnce({ records: [] })
-    .mockResolvedValueOnce({ records: [{ id: 'winner' }] });
+  candidates.findCandidateIdsByEmailsForContext
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce(['winner']);
   candidates.replaceProfile.mockRejectedValueOnce(new NotFoundException());
   records.create.mockRejectedValueOnce(new Error('unique email'));
   expect(await save()).toBe('winner');
@@ -79,6 +84,26 @@ it('does not fall through to creation on update permission failures', async () =
   await expect(save()).rejects.toThrow(ForbiddenException);
   expect(records.create).not.toHaveBeenCalled();
 });
+it('attaches a reply to the selected candidate without replacing the parsed profile', async () => {
+  const { records, candidates, save } = setup();
+  expect(
+    await save({
+      ...input,
+      explicitId: 'selected',
+      attachOnly: true,
+      senderEmails: ['sender@example.test'],
+    }),
+  ).toBe('selected');
+  expect(candidates.attachMailMaterials).toHaveBeenCalledWith(
+    {},
+    'selected',
+    input.files,
+    ['sender@example.test'],
+  );
+  expect(candidates.replaceProfile).not.toHaveBeenCalled();
+  expect(records.create).not.toHaveBeenCalled();
+});
+
 it('retains explicitly selected candidate identity without rematching its email', async () => {
   const { records, save } = setup();
   expect(await save({ ...input, explicitId: 'selected' } as typeof input)).toBe(

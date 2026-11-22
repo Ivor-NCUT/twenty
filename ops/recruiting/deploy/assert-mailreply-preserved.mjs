@@ -1,4 +1,5 @@
-/** Blocks an app-image rollout until the production mailreply layer is actually in git. */
+/** Blocks an app-image rollout until the production mailreply behavior is in a real commit. */
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +34,29 @@ if (
 ) {
   console.error(
     'mailreply-preserved.json does not match the production baseline',
+  );
+  process.exit(1);
+}
+
+const git = (args) =>
+  spawnSync('git', args, { cwd: join(directory, '../../..'), encoding: 'utf8' });
+const sourceFile =
+  'packages/twenty-server/src/modules/recruiting/mail/domain/mail-reply.ts';
+const behaviorFile =
+  'packages/twenty-server/src/modules/recruiting/intake/intake.service.ts';
+const source = git(['cat-file', '-e', `${marker.sourceCommit}:${sourceFile}`]);
+const ancestor = git(['merge-base', '--is-ancestor', marker.sourceCommit, 'HEAD']);
+const behavior = git([
+  'grep',
+  '-q',
+  'mailAttachOnly',
+  marker.sourceCommit,
+  '--',
+  behaviorFile,
+]);
+if (source.status !== 0 || ancestor.status !== 0 || behavior.status !== 0) {
+  console.error(
+    `Refusing marker ${marker.sourceCommit}: it does not contain the mail-reply source on this branch`,
   );
   process.exit(1);
 }

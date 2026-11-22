@@ -24,6 +24,10 @@ import {
   StyledRecruitingStack,
   StyledRecruitingTable,
 } from '@/recruiting/shared/styles';
+import {
+  compareDisplayedScores,
+  formatRecruitingMatchValue,
+} from '@/recruiting/matching/utils/scoreScale';
 
 /** Converts unavailable or denied clipboard access into a recoverable promise rejection. */
 const copyText = async (text: string) => {
@@ -95,7 +99,7 @@ export const MatchSelection = ({
     run.results
       ? run.results.filter((pair) => pair.status === 'SCORED')
       : (run.top ?? [])
-  ).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  ).sort(compareDisplayedScores);
   const [search, setSearch] = useState('');
   const filtered = pairs.filter((pair) =>
     `${pair.candidateLabel} ${pair.jobLabel} ${pair.companyLabel ?? ''}`
@@ -237,51 +241,55 @@ export const MatchSelection = ({
           <TableBody>
             {filtered
               .slice(0, showAll ? filtered.length : visibleCount)
-              .map((pair) => (
-                <TableRow key={identifier(pair)}>
-                  <TableCell>
-                    <Checkbox
-                      aria-label={`${t`选择`} ${run.direction === 'JOB_TO_CANDIDATES' ? pair.candidateLabel : pair.jobLabel}`}
-                      checked={selected.has(identifier(pair))}
-                      onCheckedChange={(checked) => {
-                        const next = new Set(selected);
-                        if (checked) next.add(identifier(pair));
-                        else next.delete(identifier(pair));
-                        select(next);
-                      }}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    {run.direction === 'JOB_TO_CANDIDATES' ? (
-                      <a href={pair.candidateUrl}>{pair.candidateLabel}</a>
-                    ) : (
-                      <RecruitingJobFacts
-                        id={pair.jobId}
-                        label={pair.jobLabel}
+              .map((pair) => {
+                const matchValue = formatRecruitingMatchValue(pair);
+                return (
+                  <TableRow key={identifier(pair)}>
+                    <TableCell>
+                      <Checkbox
+                        aria-label={`${t`选择`} ${run.direction === 'JOB_TO_CANDIDATES' ? pair.candidateLabel : pair.jobLabel}`}
+                        checked={selected.has(identifier(pair))}
+                        onCheckedChange={(checked) => {
+                          const next = new Set(selected);
+                          if (checked) next.add(identifier(pair));
+                          else next.delete(identifier(pair));
+                          select(next);
+                        }}
                       />
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <RecruitingCompanyName
-                      id={pair.companyId}
-                      label={pair.companyLabel}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    {pair.score?.toFixed(2)} / 4
-                    {pair.longContext && (
-                      <div>
-                        <ContextBadge
-                          variant="warning"
-                          title="长材料评分，需人工复核"
-                        >
-                          长材料
-                        </ContextBadge>
-                      </div>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                    <TableCell>
+                      {run.direction === 'JOB_TO_CANDIDATES' ? (
+                        <a href={pair.candidateUrl}>{pair.candidateLabel}</a>
+                      ) : (
+                        <RecruitingJobFacts
+                          id={pair.jobId}
+                          label={pair.jobLabel}
+                        />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <RecruitingCompanyName
+                        id={pair.companyId}
+                        label={pair.companyLabel}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {matchValue.primary}
+                      {matchValue.note && <div>{matchValue.note}</div>}
+                      {pair.longContext && (
+                        <div>
+                          <ContextBadge
+                            variant="warning"
+                            title="长材料评分，需人工复核"
+                          >
+                            长材料
+                          </ContextBadge>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
           </TableBody>
         </StyledRecruitingTable>
       </div>

@@ -38,6 +38,13 @@ import {
   type RecruitingExtractionPart,
 } from '../ai/extractor.service';
 import { RecruitingMatchingService } from '../matching/matching.service';
+import {
+  collectAddresses,
+  isReplyMail,
+  mailMetadataFromIntake,
+  normalizeEmail,
+  senderEmailsFromMetadata,
+} from '../mail/domain/mail-reply';
 import { RecruitingUploadService } from '../files/upload.service';
 import { RecruitingJobConfirmationService } from './job-confirmation.service';
 import { RecruitingCandidateRecordsService } from './candidate-records.service';
@@ -108,6 +115,8 @@ export class RecruitingIntakeService {
       proposedId: string;
       explicitId?: string;
       email?: string | null;
+      senderEmails?: string[];
+      attachOnly?: boolean;
       phone?: string | null;
       profile: Record<string, unknown>;
       files: { fileId: string; label: string }[];
@@ -116,52 +125,56 @@ export class RecruitingIntakeService {
   ): Promise<string> {
     const phone = !input.email ? exactPhone(input.phone) : undefined;
     const findExisting = async () => {
-      if (!input.email) {
-        if (!phone) return undefined;
-        let match: string | undefined;
-        let offset = 0;
-        while (true) {
-          const page = await this.records.list(context, 'person', {
-            filter: { contactRoles: { containsAny: ['CANDIDATE'] } },
-            select: ['id', 'phones', 'recruitingProfile'],
-            offset,
-            limit: 100,
-            orderBy: [{ id: OrderByDirection.AscNullsLast }],
-          });
-          for (const record of page.records) {
-            if (!isPlainObject(record) || typeof record.id !== 'string')
-              continue;
-            const profile = isPlainObject(record.recruitingProfile)
-              ? record.recruitingProfile
-              : {};
-            const native = isPlainObject(record.phones) ? record.phones : {};
-            const nativeNumber =
-              typeof native.primaryPhoneNumber === 'string'
-                ? `${native.primaryPhoneCallingCode ?? ''}${native.primaryPhoneNumber}`
-                : '';
-            if (
-              exactPhone(profile.phone) !== phone &&
-              exactPhone(nativeNumber) !== phone
-            )
-              continue;
-            if (match && match !== record.id)
-              throw new ConflictException(
-                '有多位候选人使用同一手机号，请指定要更新的候选人',
-              );
-            match = record.id;
-          }
-          if (!page.hasNextPage || !page.records.length) return match;
-          offset += page.records.length;
-        }
+      const emails = [
+        ...collectAddresses(input.email),
+        ...(Array.isArray(input.senderEmails) ? input.senderEmails : []),
+      ];
+      if (emails.length) {
+        const ids = await this.candidates.findCandidateIdsByEmailsForContext(
+          context,
+          emails,
+        );
+        if (ids.length > 1)
+          throw new ConflictException(
+            '有多位候选人使用同一邮箱，请指定要更新的候选人',
+          );
+        return ids[0];
       }
-      const page = await this.records.list(context, 'person', {
-        filter: { emails: { primaryEmail: { eq: input.email.trim() } } },
-        limit: 1,
-      });
-      const record = page.records[0];
-      return isPlainObject(record) && typeof record.id === 'string'
-        ? record.id
-        : undefined;
+      if (!phone) return undefined;
+      let match: string | undefined;
+      let offset = 0;
+      while (true) {
+        const page = await this.records.list(context, 'person', {
+          filter: { contactRoles: { containsAny: ['CANDIDATE'] } },
+          select: ['id', 'phones', 'recruitingProfile'],
+          offset,
+          limit: 100,
+          orderBy: [{ id: OrderByDirection.AscNullsLast }],
+        });
+        for (const record of page.records) {
+          if (!isPlainObject(record) || typeof record.id !== 'string') continue;
+          const profile = isPlainObject(record.recruitingProfile)
+            ? record.recruitingProfile
+            : {};
+          const native = isPlainObject(record.phones) ? record.phones : {};
+          const nativeNumber =
+            typeof native.primaryPhoneNumber === 'string'
+              ? `${native.primaryPhoneCallingCode ?? ''}${native.primaryPhoneNumber}`
+              : '';
+          if (
+            exactPhone(profile.phone) !== phone &&
+            exactPhone(nativeNumber) !== phone
+          )
+            continue;
+          if (match && match !== record.id)
+            throw new ConflictException(
+              '有多位候选人使用同一手机号，请指定要更新的候选人',
+            );
+          match = record.id;
+        }
+        if (!page.hasNextPage || !page.records.length) return match;
+        offset += page.records.length;
+      }
     };
     const existingId = input.explicitId ?? (await findExisting());
     const id =
@@ -170,12 +183,27 @@ export class RecruitingIntakeService {
         ? v5(`${context.workspace.id}:recruiting-phone:${phone}`, v5.URL)
         : input.proposedId);
     const update = async (target: string) => {
+      if (input.attachOnly) {
+        await this.candidates.attachMailMaterials(
+          context,
+          target,
+          input.files,
+          input.senderEmails ?? [],
+        );
+        return target;
+      }
       await this.candidates.replaceProfile(
         context,
         target,
         input.profile,
         input.files,
       );
+      if (Array.isArray(input.senderEmails) && input.senderEmails.length)
+        await this.candidates.mergeAdditionalEmails(
+          context,
+          target,
+          input.senderEmails,
+        );
       return target;
     };
     try {
@@ -497,6 +525,67 @@ export class RecruitingIntakeService {
       });
     };
     try {
+      if (
+        envelope.input.kind === 'CANDIDATE' &&
+        envelope.input.source === 'email'
+      ) {
+        const meta = mailMetadataFromIntake(envelope.input.mail);
+        const resolved = await this.candidates.resolveMailCandidate(
+          context,
+          meta,
+          envelope.input.candidateId,
+        );
+        if (resolved.ambiguous && isReplyMail(meta))
+          throw new ConflictException(
+            '这封回信对应多位同名或同邮箱候选人，请指定要归入的档案',
+          );
+        if (resolved.id && isReplyMail(meta)) {
+          const candidateFiles = envelope.candidateFiles ?? [];
+          for (const file of envelope.input.files.filter(
+            (entry) => entry.role !== 'archive',
+          )) {
+            if (
+              candidateFiles.some((entry) => entry.sourceFileId === file.fileId)
+            )
+              continue;
+            const copy = await this.parser.copyResumeAttachment(
+              data.actor,
+              file.fileId,
+            );
+            candidateFiles.push({
+              sourceFileId: file.fileId,
+              fileId: copy.id,
+              label: file.label,
+            });
+            await update('COPYING_FILES', { candidateFiles });
+          }
+          const files = candidateFiles.map((file) => ({
+            fileId: file.fileId,
+            label: file.label,
+          }));
+          context = await this.actors.resolve(data.actor);
+          await this.candidates.attachMailMaterials(
+            context,
+            resolved.id,
+            files,
+            senderEmailsFromMetadata(meta),
+          );
+          await this.records.update(context, 'recruitingIntake', record.id, {
+            state: 'COMPLETED',
+            targetId: resolved.id,
+            result: {
+              ...envelope,
+              stage: 'STORED',
+              candidateId: resolved.id,
+              recordUrl: `/object/person/${resolved.id}`,
+              matchingStatus: 'SKIPPED',
+              mailAttachOnly: true,
+              mailResolveReason: resolved.reason,
+            },
+          });
+          return;
+        }
+      }
       const textRecovery =
         envelope.input.source === 'reparse' && envelope.input.text?.trim();
       const materials =
@@ -680,18 +769,33 @@ export class RecruitingIntakeService {
           : {}),
       };
       context = await this.actors.resolve(data.actor);
+      const senderEmails = senderEmailsFromMetadata(
+        mailMetadataFromIntake(envelope.input.mail),
+      );
+      const primaryEmail =
+        profile.email && /.+@.+\..+/.test(profile.email)
+          ? profile.email.trim()
+          : senderEmails[0];
+      const additionalEmails = senderEmails.filter(
+        (email) => email !== normalizeEmail(primaryEmail),
+      );
+      const mailMeta = mailMetadataFromIntake(envelope.input.mail);
+      const attachOnly =
+        envelope.input.source === 'email' && isReplyMail(mailMeta);
       const candidateId = await this.storeCandidate(context, {
         proposedId,
         explicitId: envelope.input.candidateId,
         email: profile.email,
+        senderEmails,
+        attachOnly,
         phone: profile.phone,
         profile: recruitingProfile,
         files,
         createData: {
           name: { firstName: profile.name || '待补全姓名', lastName: '' },
           contactRoles: ['CANDIDATE'],
-          ...(profile.email && /.+@.+\..+/.test(profile.email)
-            ? { emails: { primaryEmail: profile.email, additionalEmails: [] } }
+          ...(primaryEmail
+            ? { emails: { primaryEmail, additionalEmails } }
             : {}),
           recruitingProfile,
           candidateResumes: files,

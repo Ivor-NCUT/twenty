@@ -107,7 +107,7 @@ const setup = (
   let maximum = 0;
   const evaluator = {
     reusePool: jest.fn(async () => new Map<string, RecruitingPairResult>()),
-    prepare: jest.fn((_context, candidate, job) => ({
+    prepare: jest.fn((_context, candidate, job, _company?) => ({
       cacheKey: job.id,
       cacheId: job.id,
       modelId: 'model',
@@ -115,7 +115,12 @@ const setup = (
       job: { label: job.id, duplicateKey: job.id },
     })),
     run: jest.fn(
-      async (_context, candidate, job): Promise<RecruitingPairResult> => {
+      async (
+        _context,
+        candidate,
+        job,
+        _company?,
+      ): Promise<RecruitingPairResult> => {
         active++;
         maximum = Math.max(maximum, active);
         await Promise.resolve();
@@ -127,6 +132,7 @@ const setup = (
           jobLabel: job.id,
           status: 'SCORED',
           score: 3,
+          scoreKind: 'jev-rubric',
           eligibility: { status: 'eligible', reasons: [] },
           cacheKey: job.id,
           cacheId: job.id,
@@ -135,6 +141,61 @@ const setup = (
           evaluatedAt: new Date().toISOString(),
           duplicateKey: job.id,
         };
+      },
+    ),
+    scoreChunk: jest.fn(
+      async (
+        ctx,
+        triples: {
+          candidate: { id: string };
+          job: { id: string };
+          company?: unknown;
+        }[],
+      ) => {
+        const rows: RecruitingPairResult[] = [];
+        let authorizationFailed = false;
+        await Promise.all(
+          triples.map(async (triple) => {
+            try {
+              rows.push(
+                await evaluator.run(
+                  ctx,
+                  triple.candidate,
+                  triple.job,
+                  triple.company,
+                ),
+              );
+            } catch (error) {
+              if (error instanceof RecruitingEvaluationAuthError)
+                authorizationFailed = true;
+              const prepared = evaluator.prepare(
+                ctx,
+                triple.candidate,
+                triple.job,
+                triple.company,
+              );
+              rows.push({
+                candidateId: triple.candidate.id,
+                jobId: triple.job.id,
+                candidateLabel: prepared.candidate.label,
+                jobLabel: prepared.job.label,
+                cacheId: prepared.cacheId,
+                cacheKey: prepared.cacheKey,
+                modelId: prepared.modelId,
+                duplicateKey: prepared.job.duplicateKey,
+                cached: false,
+                evaluatedAt: new Date().toISOString(),
+                status: 'FAILED',
+                eligibility: { status: 'needs_confirmation', reasons: [] },
+                error:
+                  error instanceof RecruitingEvaluationAuthError
+                    ? error.message
+                    : '评分暂时失败，可重试；未计为零分',
+              });
+            }
+          }),
+        );
+        return { rows, authorizationFailed };
       },
     ),
   };
@@ -653,7 +714,7 @@ it('stores workflow separately from scoring and rejects unknown workflow states'
 });
 
 it('hydrates only the requested 20 of 250 results and keeps the header cheap', async () => {
-  const { service, records, rows, jobs, evaluator } = setup(250);
+  const { service, records, rows, evaluator } = setup(250);
   await service.process({ runId: 'run', actor });
   records.list.mockImplementation(async (_ctx, object, options) => {
     const ids = (options?.filter as { id?: { in?: string[] } })?.id?.in ?? [];

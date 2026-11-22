@@ -1,21 +1,22 @@
 name: Fanhan production
 
+# No push trigger. Merging to deploy/fanhan must not start this file.
+# pull_request runs tests only and cannot read the production environment.
 on:
-  push:
+  pull_request:
     branches: [deploy/fanhan]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: fanhan-production
-  cancel-in-progress: false
-
 jobs:
   verify:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/deploy/fanhan'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     env:
       NX_NO_CLOUD: 'true'
     steps:
@@ -25,6 +26,8 @@ jobs:
         run: node ops/recruiting/build-source.mjs twenty-shared build
       - name: Build workspace package exports
         run: yarn nx run-many -t build -p twenty-ui twenty-emails twenty-client-sdk twenty-sdk twenty-front-component-renderer
+      - name: Deploy contract regression
+        run: node --test ops/recruiting/deploy/patch-compose.test.mjs
       - name: CLI regression
         run: node --test ops/recruiting/cli-auth.test.mjs ops/recruiting/cli.test.mjs ops/recruiting/cli-job-upload.test.mjs
       - name: Server regression
@@ -42,14 +45,20 @@ jobs:
 
   release:
     needs: verify
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/deploy/fanhan' && github.repository == 'Ivor-NCUT/twenty' && vars.FANHAN_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment: fanhan-production
     permissions:
       contents: read
       packages: write
     timeout-minutes: 120
+    concurrency:
+      group: fanhan-production-release
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+      - name: Refuse while the mailreply layer is absent
+        run: node ops/recruiting/deploy/assert-mailreply-preserved.mjs
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -59,10 +68,13 @@ jobs:
       - name: Define application version
         id: version
         run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          test "$owner" = "ivor-ncut"
           base_version="$(cat ops/recruiting/deploy/APP_VERSION)"
           [[ "$base_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
-          app_version="$base_version+$GITHUB_SHA"
-          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "app_version=$base_version+$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$owner/fanhan-twenty" >> "$GITHUB_OUTPUT"
       - name: Publish verified application image
         id: app
         uses: docker/build-push-action@v6
@@ -72,73 +84,18 @@ jobs:
           target: twenty
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/hedgeho9x/fanhan-twenty:${{ github.sha }}
+          tags: ${{ steps.version.outputs.image }}:${{ github.sha }}
           build-args: APP_VERSION=${{ steps.version.outputs.app_version }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=fanhan-twenty
           cache-to: type=gha,scope=fanhan-twenty,mode=max
-      - name: Publish MinerU parser image
-        id: parser
-        uses: docker/build-push-action@v6
-        with:
-          context: ops/recruiting/parser
-          file: ops/recruiting/parser/Dockerfile.mineru
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/hedgeho9x/fanhan-mineru:${{ github.sha }}
-          cache-from: type=gha,scope=fanhan-mineru
-          cache-to: type=gha,scope=fanhan-mineru,mode=max
-      - name: Deploy verified images through Dokploy
-        if: vars.FANHAN_DEPLOY_ENABLED == 'true'
+      - name: Deploy only the app image
         env:
           DEPLOY_TUNNEL_KEY: ${{ secrets.FANHAN_DOKPLOY_TUNNEL_KEY }}
           KNOWN_HOSTS: ${{ secrets.FANHAN_DOKPLOY_KNOWN_HOSTS }}
           DOKPLOY_API_KEY: ${{ secrets.FANHAN_DOKPLOY_API_KEY }}
           DOKPLOY_COMPOSE_ID: ${{ secrets.FANHAN_DOKPLOY_COMPOSE_ID }}
-          APP_DIGEST: ${{ steps.app.outputs.digest }}
-          PARSER_DIGEST: ${{ steps.parser.outputs.digest }}
-          REGISTRY_HOST: ${{ vars.FANHAN_REGISTRY_HOST }}
-        run: |
-          set -euo pipefail
-          test -n "$DOKPLOY_API_KEY" && test -n "$DOKPLOY_COMPOSE_ID"
-          umask 077
-          temp_dir="$(mktemp -d)"
-          printf '%s\n' "$DEPLOY_TUNNEL_KEY" > "$temp_dir/tunnel"
-          printf '%s\n' "$KNOWN_HOSTS" > "$temp_dir/known_hosts"
-          printf 'x-api-key: %s\n' "$DOKPLOY_API_KEY" > "$temp_dir/headers"
-          ssh -fN -i "$temp_dir/tunnel" -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$temp_dir/known_hosts" \
-            -o ConnectTimeout=15 -o ExitOnForwardFailure=yes \
-            -L 127.0.0.1:23090:127.0.0.1:3000 fanhan-deploy@43.136.55.30
-          registry_host="${REGISTRY_HOST:-ghcr.io}"
-          case "$registry_host" in ghcr.io|ghcr.nju.edu.cn) ;; *) exit 1 ;; esac
-          sed -e "s#ghcr.io/hedgeho9x/#$registry_host/hedgeho9x/#g" \
-              -e "s#fanhan-twenty:fanhan-bootstrap#fanhan-twenty@$APP_DIGEST#g" \
-              -e "s#fanhan-mineru:fanhan-bootstrap#fanhan-mineru@$PARSER_DIGEST#g" \
-              ops/recruiting/deploy/compose.yaml > "$temp_dir/compose.yaml"
-          jq -n --arg id "$DOKPLOY_COMPOSE_ID" --rawfile compose "$temp_dir/compose.yaml" \
-            '{composeId:$id, composeFile:$compose}' > "$temp_dir/update.json"
-          curl --fail --silent --show-error --max-time 60 \
-            -H @"$temp_dir/headers" -H 'Content-Type: application/json' \
-            --data-binary @"$temp_dir/update.json" http://127.0.0.1:23090/api/compose.update >/dev/null
-          jq -n --arg id "$DOKPLOY_COMPOSE_ID" --arg revision "$GITHUB_SHA" \
-            '{composeId:$id, title:("Verified release " + $revision), description:$revision}' > "$temp_dir/deploy.json"
-          curl --fail --silent --show-error --max-time 60 \
-            -H @"$temp_dir/headers" -H 'Content-Type: application/json' \
-            --data-binary @"$temp_dir/deploy.json" http://127.0.0.1:23090/api/compose.deploy >/dev/null
-      - name: Verify deployed revision
-        if: vars.FANHAN_DEPLOY_ENABLED == 'true'
-        env:
+          APP_IMAGE: ${{ steps.version.outputs.image }}@${{ steps.app.outputs.digest }}
           APP_VERSION: ${{ steps.version.outputs.app_version }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 90); do
-            if curl --fail --silent --max-time 10 https://43.136.55.30/healthz >/dev/null && \
-               curl --fail --silent --max-time 10 https://43.136.55.30/client-config | jq -e --arg version "$APP_VERSION" '.appVersion == $version and .serverUrl == "https://43.136.55.30"' >/dev/null; then
-              echo "Verified deployed revision $GITHUB_SHA"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo 'Deployment did not become healthy at the expected revision' >&2
-          exit 1
+          REGISTRY_HOST: ${{ vars.FANHAN_REGISTRY_HOST }}
+        run: node ops/recruiting/deploy/deploy-compose.mjs

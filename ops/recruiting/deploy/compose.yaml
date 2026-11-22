@@ -1,3 +1,7 @@
+# Template only. Do not upload this file over the live Dokploy compose.
+# Production server/worker image is fanhan-local/fanhan-twenty:1b2ff8f6bb70-mailreply1.
+# Resolved auto-match is true; the server .env value false must not be applied.
+# Live memory is server 1280m and worker 3g. Migrate's image is not the running app version.
 # Production application stack. Dokploy owns routing; secrets live in its environment.
 services:
   server:

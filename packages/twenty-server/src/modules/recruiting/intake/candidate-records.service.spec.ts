@@ -147,6 +147,27 @@ it('does not silently discard malformed historical attachment references', async
   expect(mutation).not.toHaveBeenCalled();
 });
 
+it('appends a reply file and sender address without replacing the career profile', async () => {
+  const { service, row, mutation } = setup();
+  await service.attachMailMaterials(
+    context,
+    'candidate',
+    [{ fileId: 'reply', label: '回复.pdf' }],
+    ['张三 <Sender@Example.TEST>'],
+  );
+  expect(
+    (row().candidateResumes as { fileId: string }[]).map((file) => file.fileId),
+  ).toEqual(['original', 'reply']);
+  expect(row().emails).toEqual({
+    primaryEmail: '',
+    additionalEmails: ['sender@example.test'],
+  });
+  expect(row().recruitingProfile).toBeUndefined();
+  expect(mutation).toHaveBeenCalledTimes(1);
+  const written = mutation.mock.calls[0][0].data;
+  expect(written.recruitingProfile).toBeUndefined();
+});
+
 it('bounds conflicts and preserves material references when a record keeps changing', async () => {
   const { service, mutation, row } = setup();
   mutation.mockImplementation(async () => []);

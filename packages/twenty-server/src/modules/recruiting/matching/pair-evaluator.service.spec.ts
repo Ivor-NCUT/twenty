@@ -265,7 +265,7 @@ describe('recruiting pair evaluator', () => {
   it('binds a reversed batch response by index and echoed text', async () => {
     const { evaluator, rerank } = setup();
     rerank.rerank.mockImplementation(
-      async (_query: string, documents: readonly string[]) => ({
+      async (_query: string, _documents: readonly string[]) => ({
         assignments: new Map([
           [1, { relevanceScore: 0.2 }],
           [0, { relevanceScore: 0.9 }],

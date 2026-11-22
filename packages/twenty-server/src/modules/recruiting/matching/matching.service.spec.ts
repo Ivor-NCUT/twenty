@@ -714,7 +714,7 @@ it('stores workflow separately from scoring and rejects unknown workflow states'
 });
 
 it('hydrates only the requested 20 of 250 results and keeps the header cheap', async () => {
-  const { service, records, rows, jobs, evaluator } = setup(250);
+  const { service, records, rows, evaluator } = setup(250);
   await service.process({ runId: 'run', actor });
   records.list.mockImplementation(async (_ctx, object, options) => {
     const ids = (options?.filter as { id?: { in?: string[] } })?.id?.in ?? [];

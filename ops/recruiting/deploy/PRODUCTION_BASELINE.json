@@ -1,0 +1,10 @@
+{
+  "serverImage": "fanhan-local/fanhan-twenty:1b2ff8f6bb70-mailreply1",
+  "workerImage": "fanhan-local/fanhan-twenty:1b2ff8f6bb70-mailreply1",
+  "imageDigest": "sha256:5c786c079a88e31277b2c1fb894749f85cc60bdae2a82cb12fdb188de4899f8b",
+  "appVersion": "2.55.0+0786a336235a",
+  "autoMatchResolved": true,
+  "serverMemory": "1280m",
+  "workerMemory": "3g",
+  "mailreplyLayerInGit": false
+}

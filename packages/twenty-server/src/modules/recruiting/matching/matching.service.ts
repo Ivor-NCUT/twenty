@@ -39,6 +39,11 @@ import {
 } from './domain/match-context';
 import { recruitingLikePattern } from '../records/domain/search';
 import { RECRUITING_MATCH_PROTOCOL } from './domain/match-protocol';
+import {
+  compareRecruitingScores,
+  recommendationPool,
+  recruitingScoreNotice,
+} from './domain/score-scale';
 
 /** Explicit target IDs narrow a run; their absence selects the complete permitted current pool. */
 export const recruitingMatchInputSchema = z
@@ -487,6 +492,7 @@ export class RecruitingMatchingService {
       complete:
         ['COMPLETED', 'NO_RESULTS'].includes(String(run.status)) &&
         !sourceChanged,
+      notice: recruitingScoreNotice(payload.results),
     };
   }
 
@@ -595,7 +601,7 @@ export class RecruitingMatchingService {
       })
       .sort(
         (a, b) =>
-          (b.score ?? -1) - (a.score ?? -1) ||
+          compareRecruitingScores(a, b) ||
           a.candidateId.localeCompare(b.candidateId) ||
           a.jobId.localeCompare(b.jobId),
       );
@@ -644,12 +650,26 @@ export class RecruitingMatchingService {
           : undefined;
       if (job.companyId && !company) return [];
       const prepared = this.evaluator.prepare(context, person, job, company);
-      const stale = prepared.cacheKey !== row.cacheKey;
+      const comparableKey =
+        this.evaluator.cacheKeyForModel?.(
+          context,
+          person,
+          job,
+          company,
+          row.modelId,
+          row.instructionId,
+        ) ?? prepared.cacheKey;
+      const stale = comparableKey !== row.cacheKey;
       return [
         {
           ...row,
           ...(stale
-            ? { status: 'STALE', storedStatus: row.status, score: undefined }
+            ? {
+                status: 'STALE',
+                storedStatus: row.status,
+                score: undefined,
+                relevanceScore: undefined,
+              }
             : {}),
           candidateLabel: prepared.candidate.label,
           jobLabel: prepared.job.label,
@@ -747,7 +767,16 @@ export class RecruitingMatchingService {
           job,
           company,
         );
-        if (prepared.cacheKey !== result.cacheKey) {
+        const comparableKey =
+          this.evaluator.cacheKeyForModel?.(
+            context,
+            candidate,
+            job,
+            company,
+            result.modelId,
+            result.instructionId,
+          ) ?? prepared.cacheKey;
+        if (comparableKey !== result.cacheKey) {
           stale++;
           continue;
         }
@@ -773,15 +802,13 @@ export class RecruitingMatchingService {
         else throw error;
       }
     }
-    const ranked = results
-      .filter((row) => row.status === 'SCORED')
-      .sort(
-        (a, b) =>
-          (b.score ?? 0) - (a.score ?? 0) ||
-          (payload.input.direction === 'JOB_TO_CANDIDATES'
-            ? a.candidateId.localeCompare(b.candidateId, 'en')
-            : a.jobId.localeCompare(b.jobId, 'en')),
-      );
+    const ranked = recommendationPool(results).sort(
+      (a, b) =>
+        compareRecruitingScores(a, b) ||
+        (payload.input.direction === 'JOB_TO_CANDIDATES'
+          ? a.candidateId.localeCompare(b.candidateId, 'en')
+          : a.jobId.localeCompare(b.jobId, 'en')),
+    );
     const duplicates = new Set<string>();
     const top = ranked
       .filter((row) => {
@@ -836,8 +863,7 @@ export class RecruitingMatchingService {
         !inaccessible &&
         !poolChanged,
       protocol: payload.protocolVersion ?? 'legacy/unrecorded',
-      notice:
-        '相对前五仅表示能力排序；意向和未知条件需人工确认，不能直接作为录用或推荐决定。',
+      notice: recruitingScoreNotice(results),
     };
   }
 
@@ -1069,72 +1095,60 @@ export class RecruitingMatchingService {
           });
           return;
         }
-        const chunk = await Promise.all(
-          selected.slice(offset, offset + 3).map(async (targetId) => {
-            if (!poolMap.has(targetId)) return undefined;
-            let target;
-            try {
-              target = await this.records.one(
+        const triples: {
+          candidate: RecruitingRecord;
+          job: RecruitingRecord;
+          company?: RecruitingRecord;
+        }[] = [];
+        for (const targetId of selected.slice(offset, offset + 3)) {
+          if (!poolMap.has(targetId)) continue;
+          let target;
+          try {
+            target = await this.records.one(
+              context,
+              jobFirst ? 'person' : 'recruitmentJob',
+              targetId,
+            );
+          } catch (error) {
+            if (error instanceof NotFoundException) continue;
+            throw error;
+          }
+          const candidate = jobFirst ? target : subject;
+          const jobRecord = jobFirst ? subject : target;
+          if (!candidate || !jobRecord || !this.isCandidate(candidate))
+            continue;
+          const company = jobFirst
+            ? currentCompany
+            : typeof jobRecord.companyId === 'string'
+              ? await this.records.one(context, 'company', jobRecord.companyId)
+              : undefined;
+          triples.push({ candidate, job: jobRecord, company });
+        }
+        if (providerAuthorizationFailed) {
+          results.push(
+            ...triples.map((triple) =>
+              this.failedPair(
                 context,
-                jobFirst ? 'person' : 'recruitmentJob',
-                targetId,
-              );
-            } catch (error) {
-              if (error instanceof NotFoundException) return undefined;
-              throw error;
-            }
-            const candidate = jobFirst ? target : subject;
-            const job = jobFirst ? subject : target;
-            if (!candidate || !job || !this.isCandidate(candidate))
-              return undefined;
-            const company = jobFirst
-              ? currentCompany
-              : typeof job.companyId === 'string'
-                ? await this.records.one(context, 'company', job.companyId)
-                : undefined;
-            try {
-              if (providerAuthorizationFailed)
-                throw new RecruitingEvaluationAuthError();
-              return await this.evaluator.run(context, candidate, job, company);
-            } catch (error) {
-              if (error instanceof RecruitingEvaluationAuthError)
-                providerAuthorizationFailed = true;
-              const prepared = this.evaluator.prepare(
-                context,
-                candidate,
-                job,
-                company,
-              );
-              return {
-                candidateId: candidate.id,
-                jobId: job.id,
-                candidateLabel: prepared.candidate.label,
-                jobLabel: prepared.job.label,
-                cacheId: prepared.cacheId,
-                cacheKey: prepared.cacheKey,
-                modelId: prepared.modelId,
-                duplicateKey: prepared.job.duplicateKey,
-                cached: false,
-                evaluatedAt: new Date().toISOString(),
-                status: 'FAILED' as const,
-                eligibility: {
-                  status: 'needs_confirmation' as const,
-                  reasons: [],
-                },
-                error:
-                  error instanceof BadRequestException ||
-                  error instanceof RecruitingEvaluationAuthError
-                    ? error.message
-                    : '评分暂时失败，可重试；未计为零分',
-              };
-            }
-          }),
-        );
-        results.push(
-          ...chunk.filter(
-            (entry): entry is RecruitingPairResult => entry !== undefined,
-          ),
-        );
+                triple,
+                new RecruitingEvaluationAuthError(),
+              ),
+            ),
+          );
+        } else if (triples.length) {
+          try {
+            const scored = await this.evaluator.scoreChunk(context, triples);
+            if (scored.authorizationFailed) providerAuthorizationFailed = true;
+            results.push(...scored.rows);
+          } catch (error) {
+            if (error instanceof RecruitingEvaluationAuthError)
+              providerAuthorizationFailed = true;
+            results.push(
+              ...triples.map((triple) =>
+                this.failedPair(context, triple, error),
+              ),
+            );
+          }
+        }
         await save('PROCESSING', { results: [...results] });
       }
       context = await this.actors.resolve(data.actor);
@@ -1200,6 +1214,43 @@ export class RecruitingMatchingService {
         },
       },
     );
+  }
+
+  /** Records one pair failure without copying provider response text into the run. */
+  private failedPair(
+    context: WorkspaceAuthContext,
+    triple: {
+      candidate: RecruitingRecord;
+      job: RecruitingRecord;
+      company?: RecruitingRecord;
+    },
+    error: unknown,
+  ): RecruitingPairResult {
+    const prepared = this.evaluator.prepare(
+      context,
+      triple.candidate,
+      triple.job,
+      triple.company,
+    );
+    return {
+      candidateId: triple.candidate.id,
+      jobId: triple.job.id,
+      candidateLabel: prepared.candidate.label,
+      jobLabel: prepared.job.label,
+      cacheId: prepared.cacheId,
+      cacheKey: prepared.cacheKey,
+      modelId: prepared.modelId,
+      duplicateKey: prepared.job.duplicateKey,
+      cached: false,
+      evaluatedAt: new Date().toISOString(),
+      status: 'FAILED',
+      eligibility: { status: 'needs_confirmation', reasons: [] },
+      error:
+        error instanceof BadRequestException ||
+        error instanceof RecruitingEvaluationAuthError
+          ? error.message
+          : '评分暂时失败，可重试；未计为零分',
+    };
   }
 
   /** Presents coverage separately from rank and contact status. */

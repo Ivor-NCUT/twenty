@@ -1,18 +1,18 @@
-/** Verifies billing boundaries, version invalidation and safe failure persistence without network calls. */
+/** Verifies rerank billing boundaries, index binding and safe failure persistence without network calls. */
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
-import { experimental_evaluate as evaluate } from 'ai';
 
 import { type WorkspaceAuthContext } from 'src/engine/core-modules/auth/types/workspace-auth-context.type';
-import { type AiModelRegistryService } from 'src/engine/metadata-modules/ai/ai-models/services/ai-model-registry.service';
 import { type PostgresAdvisoryLockService } from 'src/database/typeorm/postgres-advisory-lock.service';
 import { type RecruitingRecordsService } from '../records/records.service';
+import {
+  RerankCallError,
+  type SiliconflowRerankClient,
+} from './domain/siliconflow-rerank';
 import {
   RecruitingEvaluationAuthError,
   RecruitingPairEvaluatorService,
   type RecruitingPairResult,
 } from './pair-evaluator.service';
-
-jest.mock('ai', () => ({ experimental_evaluate: jest.fn() }));
 
 const context = { workspace: { id: 'workspace' } } as WorkspaceAuthContext;
 const candidate = {
@@ -32,7 +32,14 @@ const company = {
   recruitingDescription: '基础设施',
 };
 
-/** A native-style in-memory boundary rejects duplicate identities rather than hiding an invalid cache write. */
+const success = (documents: readonly string[]) => ({
+  assignments: new Map(
+    documents.map((_, index) => [index, { relevanceScore: 0.8 }]),
+  ),
+  failures: new Map<number, string>(),
+  usage: { inputTokens: 100, outputTokens: 1 },
+});
+
 const setup = () => {
   const rows = new Map<string, Record<string, unknown>>();
   const records = {
@@ -65,53 +72,84 @@ const setup = () => {
       },
     ),
   };
-  const registry = {
-    getEvaluationModel: () => ({ model: {} }),
-    isModelAdminAllowed: () => true,
-  };
   const locks = {
     tryWithLock: async (_name: string, callback: () => Promise<unknown>) => ({
       acquired: true,
       value: await callback(),
     }),
   };
+  const rerank = {
+    rerank: jest.fn(async (_query: string, documents: readonly string[]) =>
+      success(documents),
+    ) as jest.Mock,
+  };
   const evaluator = new RecruitingPairEvaluatorService(
     records as unknown as RecruitingRecordsService,
-    registry as unknown as AiModelRegistryService,
     locks as unknown as PostgresAdvisoryLockService,
+    rerank as unknown as SiliconflowRerankClient,
   );
-  jest.mocked(evaluate).mockResolvedValue({
-    answers: {
-      match: {
-        type: 'score',
-        score: 3.2,
-        probabilities: { '3': 0.8, '4': 0.2 },
-      },
-    },
-    usage: { inputTokens: 100 },
-    response: { modelId: 'jev-resolved' },
-  } as never);
-  return { evaluator, rows, records };
+  return { evaluator, rows, records, rerank };
 };
 
 describe('recruiting pair evaluator', () => {
-  it('reuses the same successful pair and invalidates only changed company context', async () => {
-    const { evaluator } = setup();
+  it('stores native relevance and reuses it without inventing a rubric score', async () => {
+    const { evaluator, rows, rerank } = setup();
     const first = await evaluator.run(context, candidate, job, company);
     const cached = await evaluator.run(context, candidate, job, company);
-    expect(first.score).toBe(3.2);
+    expect(first.relevanceScore).toBe(0.8);
+    expect(first.score).toBeUndefined();
+    expect(first.probabilities).toBeUndefined();
+    expect(first.confidence).toBeUndefined();
+    expect(first.scoreKind).toBe('qwen3-rerank-relevance');
+    expect(first.relevanceScore).not.toBe(3.2);
     expect(cached.cached).toBe(true);
-    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(rerank.rerank).toHaveBeenCalledTimes(1);
+    const stored = [...rows.values()][0];
+    expect(stored.score).toBeNull();
+    expect(JSON.stringify(stored.payload)).not.toContain('probabilities');
+    expect(JSON.stringify(stored.payload)).not.toContain('confidence');
+  });
+
+  it('invalidates the pair when company context changes', async () => {
+    const { evaluator, rerank } = setup();
+    const first = await evaluator.run(context, candidate, job, company);
     const changed = await evaluator.run(context, candidate, job, {
       ...company,
       recruitingDescription: '金融系统',
     });
     expect(changed.cacheId).not.toBe(first.cacheId);
-    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(rerank.rerank).toHaveBeenCalledTimes(2);
   });
 
-  it('updates expired cache identities instead of failing after a second paid call', async () => {
-    const { evaluator, rows, records } = setup();
+  it('keeps a historical JEV cache key distinct from the rerank identity', () => {
+    const { evaluator } = setup();
+    const current = evaluator.prepare(
+      context,
+      candidate,
+      job,
+      company,
+    ).cacheKey;
+    const historical = evaluator.cacheKeyForModel(
+      context,
+      candidate,
+      job,
+      company,
+      'typesafe-ai/jev-latest',
+    );
+    expect(historical).not.toBe(current);
+    expect(
+      evaluator.cacheKeyForModel(
+        context,
+        candidate,
+        job,
+        company,
+        'typesafe-ai/jev-latest',
+      ),
+    ).toBe(historical);
+  });
+
+  it('updates an expired rerank snapshot instead of creating a second row', async () => {
+    const { evaluator, rows, records, rerank } = setup();
     const first = await evaluator.run(context, candidate, job, company);
     (rows.get(first.cacheId)!.payload as RecruitingPairResult).evaluatedAt =
       new Date(Date.now() - 25 * 60 * 60_000).toISOString();
@@ -119,11 +157,11 @@ describe('recruiting pair evaluator', () => {
       false,
     );
     expect(records.create).toHaveBeenCalledTimes(1);
-    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(rerank.rerank).toHaveBeenCalledTimes(2);
   });
 
-  it('filters explicit conflict before any model or cache writes', async () => {
-    const { evaluator, records } = setup();
+  it('filters an explicit conflict before any model call or cache write', async () => {
+    const { evaluator, records, rerank } = setup();
     const result = await evaluator.run(
       context,
       {
@@ -136,22 +174,23 @@ describe('recruiting pair evaluator', () => {
       company,
     );
     expect(result.status).toBe('EXCLUDED');
+    expect(result.relevanceScore).toBeUndefined();
     expect(result.score).toBeUndefined();
-    expect(evaluate).not.toHaveBeenCalled();
+    expect(rerank.rerank).not.toHaveBeenCalled();
     expect(records.create).not.toHaveBeenCalled();
   });
 
-  it('checks native write permissions before billing', async () => {
-    const { evaluator, records } = setup();
+  it('checks native write permission before calling the provider', async () => {
+    const { evaluator, records, rerank } = setup();
     records.create.mockRejectedValue(new ForbiddenException());
     await expect(
       evaluator.run(context, candidate, job, company),
     ).rejects.toThrow(ForbiddenException);
-    expect(evaluate).not.toHaveBeenCalled();
+    expect(rerank.rerank).not.toHaveBeenCalled();
   });
 
-  it('does not truncate oversized materials or score empty identities', async () => {
-    const { evaluator } = setup();
+  it('does not truncate oversized material or score an empty identity', async () => {
+    const { evaluator, rerank } = setup();
     expect(
       (await evaluator.run(context, { id: 'empty' }, job, company)).status,
     ).toBe('NEEDS_REVIEW');
@@ -168,13 +207,13 @@ describe('recruiting pair evaluator', () => {
         )
       ).status,
     ).toBe('NEEDS_REVIEW');
-    expect(evaluate).not.toHaveBeenCalled();
+    expect(rerank.rerank).not.toHaveBeenCalled();
   });
 
-  it('sends complete non-ASCII material above the old byte ceiling and lets Jev enforce its token window', async () => {
-    const { evaluator } = setup();
+  it('sends the complete non-ASCII resume to the documented rerank fields', async () => {
+    const { evaluator, rerank } = setup();
     const text = '职业经历和具体项目。'.repeat(2000);
-    expect(Buffer.byteLength(text)).toBeGreaterThan(32000);
+    expect(Buffer.byteLength(text)).toBeGreaterThan(32_000);
     const result = await evaluator.run(
       context,
       { id: 'long', recruitingProfile: { sourceText: text } },
@@ -182,32 +221,29 @@ describe('recruiting pair evaluator', () => {
       company,
     );
     expect(result.status).toBe('SCORED');
-    const request = jest.mocked(evaluate).mock.calls[0][0];
-    expect(JSON.parse(request.state as string).resume.sourceText).toBe(text);
+    expect(result.longContext).toBe(true);
+    const documents = rerank.rerank.mock.calls[0][1];
+    expect(documents[0]).toContain(text);
+    expect(
+      documents[0].endsWith(text.slice(-20)) || documents[0].includes(text),
+    ).toBe(true);
   });
 
-  it('reports an actual provider context rejection as review-needed without a zero score or leaked response', async () => {
-    const { evaluator, rows } = setup();
-    jest.mocked(evaluate).mockRejectedValue({
-      statusCode: 400,
-      responseBody: 'context_length_exceeded: private material and secret',
-    });
+  it('reports a provider context rejection without a zero score or the response body', async () => {
+    const { evaluator, rows, rerank } = setup();
+    rerank.rerank.mockRejectedValue(new RerankCallError('context'));
     const result = await evaluator.run(context, candidate, job, company);
     expect(result.status).toBe('NEEDS_REVIEW');
+    expect(result.relevanceScore).toBeUndefined();
     expect(result.score).toBeUndefined();
     expect(JSON.stringify([...rows.values()])).not.toContain(
       'private material',
     );
-    expect(JSON.stringify([...rows.values()])).not.toContain('secret');
   });
 
-  it('persists an authorization failure without any upstream secret or zero score', async () => {
-    const { evaluator, rows } = setup();
-    jest.mocked(evaluate).mockRejectedValue({
-      statusCode: 401,
-      message: 'secret upstream request',
-      headers: { Authorization: 'secret' },
-    });
+  it('persists an authorization failure without a secret or a zero score', async () => {
+    const { evaluator, rows, rerank } = setup();
+    rerank.rerank.mockRejectedValue(new RerankCallError('auth'));
     await expect(
       evaluator.run(context, candidate, job, company),
     ).rejects.toThrow(RecruitingEvaluationAuthError);
@@ -215,52 +251,94 @@ describe('recruiting pair evaluator', () => {
     expect(record.status).toBe('FAILED');
     expect(record.score).toBeNull();
     expect(JSON.stringify(record)).not.toContain('secret');
+    expect(JSON.stringify(record)).not.toContain('SILICONFLOW_API_KEY');
+  });
+
+  it('does not retry a context rejection by shortening the same resume', async () => {
+    const { evaluator, rerank } = setup();
+    rerank.rerank.mockRejectedValue(new RerankCallError('context'));
+    await evaluator.run(context, candidate, job, company);
+    expect(rerank.rerank).toHaveBeenCalledTimes(1);
+    expect(rerank.rerank.mock.calls[0][1][0].length).toBeGreaterThan(10);
+  });
+
+  it('binds a reversed batch response by index and echoed text', async () => {
+    const { evaluator, rerank } = setup();
+    rerank.rerank.mockImplementation(
+      async (_query: string, documents: readonly string[]) => ({
+        assignments: new Map([
+          [1, { relevanceScore: 0.2 }],
+          [0, { relevanceScore: 0.9 }],
+        ]),
+        failures: new Map<number, string>(),
+      }),
+    );
+    const other = {
+      id: 'other',
+      recruitingProfile: { summary: '另一位候选人的独立经历' },
+    };
+    const { rows } = await evaluator.scoreChunk(context, [
+      { candidate, job, company },
+      { candidate: other, job, company },
+    ]);
+    expect(rows.map((row) => [row.candidateId, row.relevanceScore])).toEqual([
+      ['candidate', 0.9],
+      ['other', 0.2],
+    ]);
+    expect(rerank.rerank).toHaveBeenCalledTimes(1);
+    expect(rerank.rerank.mock.calls[0][1]).toHaveLength(2);
+  });
+
+  it('drops a mismatched document instead of assigning that score to someone else', async () => {
+    const { evaluator, rerank } = setup();
+    rerank.rerank.mockResolvedValue({
+      assignments: new Map(),
+      failures: new Map([[0, '响应文档与请求索引不一致，未采用该相关度']]),
+    });
+    const result = await evaluator.run(context, candidate, job, company);
+    expect(result.status).toBe('FAILED');
+    expect(result.relevanceScore).toBeUndefined();
+    expect(result.score).toBeUndefined();
+    expect(result.error).toContain('索引');
+  });
+
+  it('rejects an empty or illegal provider score without storing zero', async () => {
+    const { evaluator, rerank, rows } = setup();
+    rerank.rerank.mockResolvedValueOnce({
+      assignments: new Map(),
+      failures: new Map([[0, '重排响应没有可用结果，未记为零分']]),
+    });
+    const empty = await evaluator.run(context, candidate, job, company);
+    expect(empty.status).toBe('FAILED');
+    expect(empty.relevanceScore).toBeUndefined();
+    rerank.rerank.mockResolvedValueOnce({
+      assignments: new Map(),
+      failures: new Map([[0, '相关度无效，未换算成能力分']]),
+    });
+    const illegal = await evaluator.run(context, candidate, job, company);
+    expect(illegal.relevanceScore).toBeUndefined();
+    expect(JSON.stringify([...rows.values()])).not.toContain(
+      '"relevanceScore"',
+    );
   });
 });
-it('retries wrapped context rejections with the identical full input and labels the longer evaluation', async () => {
-  const { evaluator, rows } = setup();
-  const normal = jest.mocked(evaluate).getMockImplementation()!;
-  const successful = await normal({} as never);
-  jest
-    .mocked(evaluate)
-    .mockRejectedValueOnce({
-      statusCode: 400,
-      message: 'Gateway rejected the request',
-      cause: {
-        statusCode: 400,
-        responseBody: 'max_tokens_exceeded: private body',
-      },
-    })
-    .mockResolvedValueOnce(successful);
-  const result = await evaluator.run(context, candidate, job, company);
-  expect(result.status).toBe('SCORED');
-  expect(result.longContext).toBe(true);
-  const [first, second] = jest
-    .mocked(evaluate)
-    .mock.calls.map(([input]) => input);
-  expect(first.providerOptions).toBeUndefined();
-  expect(second.providerOptions).toEqual({ typesafe: { longContext: true } });
-  expect(second.state).toEqual(first.state);
-  expect(second.questions).toEqual(first.questions);
-  expect(JSON.stringify([...rows.values()])).not.toContain('private body');
-});
 
-it('batch-reuses only current unexpired scores without another paid evaluation', async () => {
-  const { evaluator, records, rows } = setup();
+it('batch-reuses only a current unexpired relevance score', async () => {
+  const { evaluator, records, rows, rerank } = setup();
   const first = await evaluator.run(context, candidate, job, company);
   records.one.mockClear();
   const reused = await evaluator.reusePool(context, [candidate], job, company);
   expect(reused.get(candidate.id)).toMatchObject({
-    score: first.score,
+    relevanceScore: first.relevanceScore,
     cached: true,
   });
   expect(records.byIds).toHaveBeenCalledTimes(1);
   expect(records.one).not.toHaveBeenCalled();
-  expect(evaluate).toHaveBeenCalledTimes(1);
+  expect(rerank.rerank).toHaveBeenCalledTimes(1);
   const stored = [...rows.values()][0];
   (stored.payload as RecruitingPairResult).evaluatedAt = '2000-01-01T00:00:00Z';
   expect(
     (await evaluator.reusePool(context, [candidate], job, company)).size,
   ).toBe(0);
-  expect(evaluate).toHaveBeenCalledTimes(1);
+  expect(rerank.rerank).toHaveBeenCalledTimes(1);
 });

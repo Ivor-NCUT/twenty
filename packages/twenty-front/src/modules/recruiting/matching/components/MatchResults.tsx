@@ -291,6 +291,7 @@ export const RecruitingMatchResults = ({
                 已处理 {run.counts.processed} / {run.counts.total} · 已评分{' '}
                 {run.counts.scored} · 默认展示推荐前 5 名，可展开至前 10 名
               </CardDescription>
+              {run.notice && <CardDescription>{run.notice}</CardDescription>}
               {running && (
                 <Progress
                   value={
